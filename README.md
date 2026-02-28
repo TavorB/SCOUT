@@ -19,24 +19,24 @@ At each round the decision maker must choose whether or not to test the patient 
 
 The goal is to **minimize the total number of tests used** while ensuring the cumulative misclassification rate never exceeds a user-supplied tolerance $\alpha$ (with high probability $1 - \delta$).
 
-The disease label follows a logistic model: $Y_t \sim \text{Bernoulli}(\sigma(\mathbf{x}_t^\top \theta^*))$, where $\theta^*$ and the context distribution $P$ are both unknown.
+The disease label follows a logistic model: $Y_t \sim \text{Bernoulli}(\sigma(\mathbf{x}_t^\top \theta^\star))$, where $\theta^\star$ and the context distribution $P$ are both unknown.
 
 ---
 
 ## Key Concepts
 
-### $\theta^*$ and $\tau^*$
+### $\theta^\star$ and $\tau^\star$
 
-$\theta^*$ is the true (unknown) logistic regression parameter.  SCOUT estimates it online from tested patients.
+$\theta^\star$ is the true (unknown) logistic regression parameter.  SCOUT estimates it online from tested patients.
 
-$\tau^*$ is the *optimal decision threshold*: the smallest $\tau$ such that the fraction of mispredictions made when not testing satisfies the $\alpha$ constraint.
+$\tau^\star$ is the *optimal decision threshold*: the smallest $\tau$ such that the fraction of mispredictions made when not testing satisfies the $\alpha$ constraint.
 
 
-Intuitively, $\tau^*$ is the confidence score below which a patient is uncertain enough to warrant testing.
+Intuitively, $\tau^\star$ is the confidence score below which a patient is uncertain enough to warrant testing.
 
 ### Optimal Baseline ("opt")
 
-The opt baseline assumes full knowledge of $\theta^*$ and $P$.  It tests patient $t$ if and only if $|\mathbf{x}_t^\top \theta^*| < \tau^*$, achieving test fraction $p^* = P(|\mathbf{x}^\top \theta^*| \leq \tau^*)$.
+The opt baseline assumes full knowledge of $\theta^\star$ and $P$.  It tests patient $t$ if and only if $|\mathbf{x}_t^\top \theta^\star| < \tau^\star$, achieving test fraction $p^\star = P(|\mathbf{x}^\top \theta^\star| \leq \tau^\star)$.
 SCOUT achieves **sublinear regret** relative to this oracle: the excess number of tests grows as $\tilde{O}(\sqrt{T})$, so the per-round gap vanishes.
 
 ### Safety Guarantee
