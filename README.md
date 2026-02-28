@@ -2,7 +2,9 @@
 
 
 **"The Good, the Bad, and the Sampled: a No-Regret Approach to Safe Online Classification"** 
+
 Tavor Baharav $\star\dagger$, Spyros Dragazis $\star$, Aldo Pacchiano $\dagger$.
+
 *AISTATS 2026 Spotlight (earlier version appeared in ICML 2025 EXAIT Workshop)*.
 
 ---
