@@ -2,10 +2,8 @@
 
 
 **"The Good, the Bad, and the Sampled: a No-Regret Approach to Safe Online Classification"** 
-<!-- Tavor Z. Baharav\*†, Spyros Dragazis\*, Aldo Pacchiano†. -->
-*ICML 2025 EXAIT Workshop · AISTATS 2026 Spotlight*
-
-<!-- \* Equal contribution &nbsp;&nbsp; † Corresponding author -->
+Tavor Baharav$\star\dagger$, Spyros Dragazis$\star$, Aldo Pacchiano$\dagger$
+*AISTATS 2026 Spotlight (earlier version appeared in ICML 2025 EXAIT Workshop)*.
 
 ---
 
