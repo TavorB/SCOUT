@@ -1,8 +1,7 @@
 """
-Minimal smoke tests for SCOUT_cleaned.py.
+Minimal smoke tests for SCOUT.py.
 
 Run with pytest:
-    cd github_code/
     pytest test_scout.py -v
 
 Or standalone:
@@ -10,10 +9,13 @@ Or standalone:
 """
 
 import os
+import shutil
 import sys
 import numpy as np
 
-# Ensure tests run from the github_code/ directory so that figures/ is created there.
+_TEST_OUT_DIR = "SCOUT_test_dir"
+
+# Ensure tests run from the correct directory so that SCOUT_test_dir/ is created there.
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # Suppress matplotlib display in headless environments.
@@ -24,7 +26,7 @@ matplotlib.use('Agg')
 # ---------------------------------------------------------------------------
 # Helpers imported from the module under test
 # ---------------------------------------------------------------------------
-from github_code.SCOUT import (
+from SCOUT import (
     logistic,
     draw_unit_ball_vector,
     generate_synthetic_data,
@@ -139,7 +141,8 @@ def test_run_scout_experiment():
     d, T = 2, 300
     true_theta = np.array([1.0, 0.0])
     results = run_scout_experiment(d=d, T=T, alpha=0.1, delta=0.1, S=1,
-                                   true_theta=true_theta, num_runs=1)
+                                   true_theta=true_theta, num_runs=1,
+                                   out_dir=_TEST_OUT_DIR)
 
     expected_keys = {'error_rate', 'error_std', 'test_rate', 'test_rate_std',
                      'num_tests', 'num_tests_std', 'error_threshold'}
@@ -151,7 +154,7 @@ def test_run_scout_experiment():
     assert results['error_threshold'] == 0.1
 
     # .npz file should have been created
-    npz_path = f"figures/SCOUT_results_d={d}_T={T}_alpha=0.1.npz"
+    npz_path = f"{_TEST_OUT_DIR}/SCOUT_results_d={d}_T={T}_alpha=0.1.npz"
     assert os.path.isfile(npz_path), f"Expected .npz output at {npz_path}"
 
 
@@ -162,7 +165,8 @@ def test_run_scout_experiment():
 def test_eval_on_real_data():
     """eval_on_real_data returns correct dict with right array shapes."""
     X, Y, _ = generate_synthetic_data(d=2, n=300, true_theta=None, S=1, seed=0)
-    results = eval_on_real_data(X, Y, alpha=0.1, num_perms=2, delta=0.1, S=1)
+    results = eval_on_real_data(X, Y, alpha=0.1, num_perms=2, delta=0.1, S=1,
+                                out_dir=_TEST_OUT_DIR)
 
     expected_keys = {'theta_star', 'tau_star', 'opt_test_rate',
                      'all_cum_tests', 'all_cum_errors',
@@ -186,7 +190,8 @@ def test_eval_on_real_data():
 def test_validate_on_synthetic_data():
     """validate_on_synthetic_data runs the full real-data pipeline on known data."""
     results = validate_on_synthetic_data(d=2, n=300, alpha=0.1,
-                                         num_perms=2, delta=0.1)
+                                         num_perms=2, delta=0.1,
+                                         out_dir=_TEST_OUT_DIR)
     assert 'true_theta' in results, "'true_theta' key missing from result"
     assert results['true_theta'].shape == (2,)
     # Inherits all keys from eval_on_real_data
@@ -198,14 +203,8 @@ def test_validate_on_synthetic_data():
 # Cleanup
 # ---------------------------------------------------------------------------
 
-_TEST_OUTPUT_FILES = [
-    "figures/SCOUT_results_d=2_T=300_alpha=0.1.npz",
-]
-
 def cleanup_test_outputs():
-    for path in _TEST_OUTPUT_FILES:
-        if os.path.isfile(path):
-            os.remove(path)
+    shutil.rmtree(_TEST_OUT_DIR, ignore_errors=True)
 
 
 # pytest session-scoped fixture: runs cleanup after all tests finish.

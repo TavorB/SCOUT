@@ -527,7 +527,7 @@ class _RealDataSCOUT(SCOUTAlgorithm):
 
 def plot_aggregate_results(all_cum_tests, all_cum_errors, all_cum_tests_opt,
                             all_cum_errors_opt, alpha, opt_test_rate,
-                            label_prefix="SCOUT", fig_fname=None):
+                            label_prefix="SCOUT", fig_fname=None, out_dir="figures"):
     """
     Plot mean and 10-90 percentile bands for cumulative test/error rates.
 
@@ -536,7 +536,7 @@ def plot_aggregate_results(all_cum_tests, all_cum_errors, all_cum_tests_opt,
       Middle — excess tests over oracle (regret)
       Right  — cumulative error rate vs target alpha
 
-    The figure is saved to figures/{label_prefix}_Results_aggregate.pdf.
+    The figure is saved to {out_dir}/{fig_fname or label_prefix}_Results_aggregate.pdf.
 
     Parameters
     ----------
@@ -550,7 +550,10 @@ def plot_aggregate_results(all_cum_tests, all_cum_errors, all_cum_tests_opt,
         Oracle cumulative error rate per round for each run.
     alpha : float — target error rate (drawn as horizontal reference line)
     opt_test_rate : float — oracle steady-state test fraction (reference line)
-    label_prefix : str — prefix used for legend labels and filename
+    label_prefix : str — prefix used for legend labels and default filename
+    fig_fname : str or None — base filename (without extension) for the saved PDF;
+        defaults to ``{label_prefix}_Results_aggregate`` if None
+    out_dir : str — directory where the PDF is saved (default "figures")
     """
     all_cum_tests = np.array(all_cum_tests)
     all_cum_errors = np.array(all_cum_errors)
@@ -637,7 +640,7 @@ def plot_aggregate_results(all_cum_tests, all_cum_errors, all_cum_tests_opt,
 
     plt.tight_layout()
     fig_title = f"{fig_fname}.pdf" if fig_fname is not None else f"{label_prefix}_Results_aggregate.pdf"
-    plt.savefig("figures/" + fig_title, bbox_inches='tight')
+    plt.savefig(str(Path(out_dir) / fig_title), bbox_inches='tight')
     plt.show()
 
 
@@ -646,7 +649,8 @@ def plot_aggregate_results(all_cum_tests, all_cum_errors, all_cum_tests_opt,
 # ---------------------------------------------------------------------------
 
 def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
-                          true_theta=None, num_runs=1, aggressiveness=1.0, debug=False):
+                          true_theta=None, num_runs=1, aggressiveness=10.0, debug=False,
+                          out_dir="figures"):
     """
     Run the SCOUT synthetic experiment and aggregate results across runs.
 
@@ -663,6 +667,7 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
     num_runs : int — number of independent runs (seeds 0, 1, ..., num_runs-1)
     aggressiveness : float - (default 1.0).  Higher values → more aggressive testing (tighter confidence sets, weaker regularisation)
     debug : bool - if True, track per-round theta estimates, confidence radii, and lambdas for debugging
+    out_dir : str — directory for .npz and .pdf outputs (default "figures")
 
     Returns
     -------
@@ -750,7 +755,8 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
           f"± {avg_results['num_tests_std']:.1f} out of {T}")
 
     title = f"SCOUT_results_d={d}_T={T}_alpha={alpha}"
-    fname = f"figures/{title}.npz"
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    fname = str(Path(out_dir) / f"{title}.npz")
     debug_kwargs = dict(
         all_theta_ests=np.array(all_run_theta_ests),
         all_lambds=np.array(all_run_lambds),
@@ -768,12 +774,13 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
     plot_aggregate_results(all_cum_tests, all_cum_errors, all_cum_tests_opt,
                            all_cum_errors_opt, alpha, opt_test_rate,
                            label_prefix=f"SCOUT (d={d}, T={T}, α={alpha})",
-                           fig_fname=title)
+                           fig_fname=title, out_dir=out_dir)
 
     return avg_results
 
 
-def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressiveness=1.0, title=None, debug=False):
+def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressiveness=10.0,
+                      title=None, debug=False, out_dir="figures"):
     """
     Evaluate SCOUT on a real labelled dataset.
 
@@ -806,9 +813,17 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
         core algorithm in the current implementation but is passed through for
         consistency with the theoretical framework.
     aggressiveness : float
-        Rescales the confidence radius: looseness_factor_beta = 500 * aggressiveness.
-        Values > 1 test fewer samples (more aggressive); < 1 test more (more
-        conservative, safer).  Default 1.0 matches the standard SCOUT behaviour.
+        Rescales the confidence radius and regularisation strength.
+        With a value of 1.0: extremely conservative and safe, 
+        but slow convergence to optimal testing rate.
+        Default value of 10.0, higher values → more aggressive testing.
+    title : str or None
+        Base filename (without extension) for .npz and .pdf outputs.
+        Defaults to ``SCOUT_results_n={n}_d={d}_alpha={alpha}`` if None.
+    debug : bool
+        If True, records per-permutation theta estimates, confidence radii,
+        and lambda values in the saved .npz (default False).
+    out_dir : str — directory for .npz and .pdf outputs (default "figures")
 
     Returns
     -------
@@ -828,7 +843,7 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
     if title is None:
         title = f"SCOUT_results_n={n}_d={d}_alpha={alpha}"
 
-    Path("figures").mkdir(parents=True, exist_ok=True)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     print(f"eval_on_real_data: n={n}, d={d}, alpha={alpha}, "
           f"num_perms={num_perms}, delta={delta}")
@@ -894,7 +909,7 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
         all_lambds=np.array(all_perm_lambds),
         all_diam_bounds=np.array(all_perm_diam_bounds),
     ) if debug else {}
-    fname = f"figures/{title}.npz"
+    fname = str(Path(out_dir) / f"{title}.npz")
     np.savez(fname,
              all_cum_tests=all_cum_tests,
              all_cum_errors=all_cum_errors,
@@ -910,7 +925,7 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
         all_cum_tests_opt, all_cum_errors_opt,
         alpha, opt_test_rate,
         label_prefix="SCOUT (real data)",
-        fig_fname=title
+        fig_fname=title, out_dir=out_dir
     )
 
     return {
@@ -925,7 +940,7 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
 
 
 def validate_on_synthetic_data(d=2, n=5000, alpha=0.05, true_theta=None, S=1,
-                                num_perms=5, delta=0.1, seed=42):
+                                num_perms=5, delta=0.1, seed=42, out_dir="figures"):
     """
     Validate eval_on_real_data using known synthetic data.
 
@@ -943,6 +958,7 @@ def validate_on_synthetic_data(d=2, n=5000, alpha=0.05, true_theta=None, S=1,
     num_perms : int — permutations passed to eval_on_real_data (default 5)
     delta : float — failure probability (default 0.1)
     seed : int — random seed (default 42)
+    out_dir : str — directory for .npz and .pdf outputs (default "figures")
 
     Returns
     -------
@@ -953,6 +969,7 @@ def validate_on_synthetic_data(d=2, n=5000, alpha=0.05, true_theta=None, S=1,
     results = eval_on_real_data(
         X, Y, alpha=alpha, num_perms=num_perms, delta=delta, S=S,
         title=f"SCOUT_synthetic_validate_d={d}_n={n}_alpha={alpha}",
+        out_dir=out_dir,
     )
     results['true_theta'] = true_theta
     return results
@@ -962,13 +979,13 @@ def validate_on_synthetic_data(d=2, n=5000, alpha=0.05, true_theta=None, S=1,
 # Paper figure reproduction
 # ---------------------------------------------------------------------------
 
-def generate_paper_figures():
+def generate_paper_figures(out_dir="figures"):
     """
     Reproduce all three synthetic experiments from the AISTATS 2026 paper.
 
     Runs SCOUT with each of the three (d, alpha) configurations reported in
-    the paper, saves figures to the figures/ directory, and returns a list
-    of per-experiment result dicts.
+    the paper, saves outputs to ``out_dir``, and returns a list of
+    per-experiment result dicts.
 
     Experiment configurations
     -------------------------
@@ -978,9 +995,12 @@ def generate_paper_figures():
 
     All experiments use T=100 000 rounds, delta=0.1, S=1, 100 independent
     runs, and true_theta = (1/sqrt(d), ..., 1/sqrt(d)) * S.
+
+    Parameters
+    ----------
+    out_dir : str — directory for .npz and .pdf outputs (default "figures")
     """
     np.random.seed(42)
-    Path("figures").mkdir(parents=True, exist_ok=True)
 
     T = 100_000
     delta = 0.1
@@ -997,7 +1017,8 @@ def generate_paper_figures():
     for cfg in configs:
         d, alpha = cfg["d"], cfg["alpha"]
         true_theta = np.ones(d) / np.sqrt(d) * S
-        results = run_scout_experiment(d, T, alpha, delta, S, true_theta, num_runs=num_runs)
+        results = run_scout_experiment(d, T, alpha, delta, S, true_theta,
+                                       num_runs=num_runs, out_dir=out_dir)
         all_results.append(results)
 
     return all_results
