@@ -200,6 +200,153 @@ def test_validate_on_synthetic_data():
 
 
 # ---------------------------------------------------------------------------
+# Test 7: recompute_frac — legacy schedule (None)
+# ---------------------------------------------------------------------------
+
+def test_recompute_frac_legacy():
+    """recompute_frac=None uses the tapering schedule; recompute_burn_in_rounds respected."""
+    true_theta = np.ones(2) / np.sqrt(2)
+    algo = SCOUTAlgorithm(d=2, T=25000, alpha=0.1, delta=0.1,
+                          true_theta=true_theta, recompute_frac=None,
+                          recompute_burn_in_rounds=50)
+    assert algo._recompute_rounds is None
+    assert algo.recompute_burn_in_rounds == 50
+
+    cases = [
+        (0, True),
+        (49, True),
+        (50, True),    # 50 % 10 == 0
+        (51, False),
+        (3000, True),  # 3000 % 40 == 0
+        (3001, False),
+        (6000, True),  # 6000 % 100 == 0
+        (6001, False),
+        (10000, True), # 10000 % 200 == 0  (t < 20000)
+        (10001, False),
+        (20000, True), # 20000 % 500 == 0
+        (20001, False),
+    ]
+    for t, expected in cases:
+        got = algo.compute_on_round(t)
+        assert got == expected, f"legacy compute_on_round({t})={got}, want {expected}"
+
+
+# ---------------------------------------------------------------------------
+# Test 8: recompute_frac=1.0 — recompute every round
+# ---------------------------------------------------------------------------
+
+def test_recompute_frac_all():
+    """recompute_frac=1.0 returns True for every round."""
+    true_theta = np.ones(2) / np.sqrt(2)
+    algo = SCOUTAlgorithm(d=2, T=5000, alpha=0.1, delta=0.1,
+                          true_theta=true_theta, recompute_frac=1.0)
+    assert algo._recompute_rounds == "all"
+    for t in [0, 1, 49, 50, 100, 1000, 4999]:
+        assert algo.compute_on_round(t), f"recompute_frac=1.0: round {t} should be True"
+
+
+# ---------------------------------------------------------------------------
+# Test 9: recompute_frac fractional — count and log-spacing
+# ---------------------------------------------------------------------------
+
+def test_recompute_frac_logspaced():
+    """recompute_frac=0.1 produces exactly round(frac*T) rounds, log-spaced.
+
+    Uses recompute_burn_in_rounds=100 (non-default) to verify the parameter
+    is wired through, not still hardcoded to 50.
+    """
+    T, frac, burn_in = 10000, 0.1, 100
+    true_theta = np.ones(2) / np.sqrt(2)
+    algo = SCOUTAlgorithm(d=2, T=T, alpha=0.1, delta=0.1,
+                          true_theta=true_theta, recompute_frac=frac,
+                          recompute_burn_in_rounds=burn_in)
+    rounds = algo._recompute_rounds
+    assert isinstance(rounds, set)
+    assert min(rounds) >= burn_in, f"min round {min(rounds)} < burn_in={burn_in}"
+    assert max(rounds) <= T - 1, f"max round {max(rounds)} >= T"
+
+    # New algorithm guarantees exactly k rounds (no dedup loss).
+    k = min(max(1, round(frac * T)), (T - 1) - burn_in + 1)
+    assert len(rounds) == k, f"expected exactly {k} rounds, got {len(rounds)}"
+
+    # Log-spacing: gaps between consecutive rounds should grow over time.
+    sorted_rounds = sorted(rounds)
+    gaps = np.diff(sorted_rounds)
+    first_half_gaps = gaps[:len(gaps) // 2]
+    second_half_gaps = gaps[len(gaps) // 2:]
+    assert np.median(second_half_gaps) > np.median(first_half_gaps), \
+        f"not log-spaced: median gap first half={np.median(first_half_gaps):.1f}, " \
+        f"second half={np.median(second_half_gaps):.1f}"
+
+
+# ---------------------------------------------------------------------------
+# Test 10: recompute_frac tiny → exactly 1 round
+# ---------------------------------------------------------------------------
+
+def test_recompute_frac_tiny():
+    """recompute_frac=0.001 with T=1000 clamps to exactly 1 recompute round."""
+    true_theta = np.ones(2) / np.sqrt(2)
+    algo = SCOUTAlgorithm(d=2, T=1000, alpha=0.1, delta=0.1,
+                          true_theta=true_theta, recompute_frac=0.001,
+                          recompute_burn_in_rounds=50)
+    rounds = algo._recompute_rounds
+    assert isinstance(rounds, set)
+    assert len(rounds) == 1, f"expected 1 round, got {len(rounds)}: {rounds}"
+
+
+# ---------------------------------------------------------------------------
+# Test 11: norm-10 theta_star with auto-computed S
+# ---------------------------------------------------------------------------
+
+def test_norm10_auto_S():
+    """eval_on_real_data auto-computes S correctly when ||theta*|| = 10."""
+    d, n = 2, 600
+    true_theta = np.array([10.0, 0.0])
+    X, Y, _ = generate_synthetic_data(d, n, true_theta=true_theta, seed=7)
+
+    # Expected S ≈ 2 * ||theta_mle|| * mean_row_norm ≈ 2 * 10 * ~1 ≈ 20
+    theta_mle = compute_theta_mle(X, Y)
+    mean_norm = np.mean(np.linalg.norm(X, axis=1))
+    expected_S = 2.0 * np.linalg.norm(theta_mle) * mean_norm
+    assert 10 < expected_S < 40, \
+        f"expected_S={expected_S:.3f} outside plausible range [10, 40]"
+
+    results = eval_on_real_data(
+        X, Y, alpha=0.1, num_perms=3, delta=0.1,
+        S=None, out_dir=_TEST_OUT_DIR,
+        title="test_norm10_auto_S",
+    )
+
+    assert isinstance(results, dict)
+    assert 'all_cum_tests' in results
+    cum_tests = results['all_cum_tests']
+    assert cum_tests.shape == (3, n), \
+        f"all_cum_tests shape {cum_tests.shape} != (3, {n})"
+    # cum_tests stores cumulative rates; warmup alone gives 50/n tests minimum
+    for i in range(3):
+        total_tests = cum_tests[i, -1] * n
+        assert total_tests >= 50, \
+            f"perm {i}: only {total_tests:.1f} total tests, expected >= 50 (warmup)"
+
+
+# ---------------------------------------------------------------------------
+# Test 12: recompute_burn_in_rounds=0 — no crash, rounds start from 1
+# ---------------------------------------------------------------------------
+
+def test_recompute_burn_in_rounds_zero():
+    """recompute_burn_in_rounds=0 must not crash; rounds clamped to start at 1."""
+    true_theta = np.ones(2) / np.sqrt(2)
+    algo = SCOUTAlgorithm(d=2, T=500, alpha=0.1, delta=0.1,
+                          true_theta=true_theta, recompute_frac=0.1,
+                          recompute_burn_in_rounds=0)
+    rounds = algo._recompute_rounds
+    assert isinstance(rounds, set)
+    assert len(rounds) >= 1
+    assert min(rounds) >= 1, f"min round {min(rounds)} should be >= 1 (geomspace nonzero guard)"
+    assert max(rounds) <= 499
+
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 
@@ -232,6 +379,12 @@ if __name__ == "__main__":
         test_run_scout_experiment,
         test_eval_on_real_data,
         test_validate_on_synthetic_data,
+        test_recompute_frac_legacy,
+        test_recompute_frac_all,
+        test_recompute_frac_logspaced,
+        test_recompute_frac_tiny,
+        test_norm10_auto_S,
+        test_recompute_burn_in_rounds_zero,
     ]
 
     failures = []

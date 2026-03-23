@@ -39,18 +39,6 @@ def logistic(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
-def draw_2d_unit_ball_vector():
-    """
-    Draw a random 2-D vector from the unit disk, heavily biased toward the boundary.
-
-    The radius is drawn as U^0.01 where U ~ Uniform(0, 1), which concentrates
-    almost all mass near r = 1 (i.e. on the unit circle).  This mimics a
-    distribution whose support is essentially the circle boundary.
-    """
-    r = np.random.uniform(0, 1) ** 0.01
-    theta = np.random.uniform(0, 2 * np.pi)
-    return np.array([r * np.cos(theta), r * np.sin(theta)])
-
 
 def draw_unit_ball_vector(d, bias_towards_edge=True):
     """
@@ -238,13 +226,47 @@ def generate_synthetic_data(d, n, true_theta=None, S=1, seed=None):
         np.random.seed(seed)
     if true_theta is None:
         true_theta = np.ones(d) / np.sqrt(d) * S
-    if d == 2:
-        X = np.array([draw_2d_unit_ball_vector() for _ in range(n)])
-    else:
-        X = np.array([draw_unit_ball_vector(d) for _ in range(n)])
+    X = np.array([draw_unit_ball_vector(d) for _ in range(n)])
     probs = logistic(X @ true_theta)
     Y = np.random.binomial(1, probs)
     return X, Y, true_theta
+
+
+# ---------------------------------------------------------------------------
+# Recompute schedule helper
+# ---------------------------------------------------------------------------
+
+def _log_spaced_recompute_rounds(T, recompute_frac, recompute_burn_in_rounds):
+    """
+    Return a sorted np.ndarray of exactly k integer rounds in
+    [recompute_burn_in_rounds, T-1], log-spaced via geomspace.
+
+    k = min(max(1, round(recompute_frac * T)), max_val - min_val + 1).
+
+    Collisions from rounding are resolved by a forward pass (push right) then
+    a backward pass (clamp to T-1 and push left), guaranteeing exactly k
+    distinct integers without silently dropping any.
+    """
+    min_val = max(1, recompute_burn_in_rounds)  # geomspace requires nonzero endpoints
+    max_val = max(min_val + 1, T - 1)
+    k = max(1, round(recompute_frac * T))
+    k = min(k, max_val - min_val + 1)
+
+    pts = np.round(np.geomspace(min_val, max_val, k)).astype(int)
+
+    # Forward pass: push duplicates right.
+    for i in range(1, k):
+        if pts[i] <= pts[i - 1]:
+            pts[i] = pts[i - 1] + 1
+
+    # Backward pass: clamp to max_val and push left.
+    if pts[-1] > max_val:
+        pts[-1] = max_val
+        for i in range(k - 2, -1, -1):
+            if pts[i] >= pts[i + 1]:
+                pts[i] = pts[i + 1] - 1
+
+    return pts
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +288,8 @@ class SCOUTAlgorithm:
     """
 
     def __init__(self, d, T, alpha, delta, true_theta, S=1,
-                 looseness_factor_beta=500, looseness_factor_theta_est=1):
+                 looseness_factor_beta=500, looseness_factor_theta_est=1,
+                 recompute_frac=None, recompute_burn_in_rounds=50):
         """
         Parameters
         ----------
@@ -283,6 +306,16 @@ class SCOUTAlgorithm:
             Divisor applied to the regularisation strength in compute_theta_est_cvx.
             Larger values → weaker regularisation → faster convergence of theta_est
             (default 1).
+        recompute_frac : float or None
+            Fraction of rounds on which theta/tau estimates are recomputed.
+            None (default): use the legacy tapering schedule (backward compatible).
+            1.0: recompute every round (highest accuracy, slowest).
+            0 < f < 1: recompute on exactly round(f * T) log-spaced timesteps in
+            [recompute_burn_in_rounds, T-1].
+        recompute_burn_in_rounds : int
+            Number of initial rounds treated as warmup (default 50).  During warmup
+            the algorithm always tests (Zt=1) and the log-spaced recompute schedule
+            starts after this point.
         """
         self.d = d
         self.T = T
@@ -291,6 +324,15 @@ class SCOUTAlgorithm:
         self.S = S
         self.looseness_factor_beta = looseness_factor_beta
         self.looseness_factor_theta_est = looseness_factor_theta_est
+        self.recompute_burn_in_rounds = recompute_burn_in_rounds
+
+        if recompute_frac is None:
+            self._recompute_rounds = None  # use legacy schedule
+        elif recompute_frac >= 1.0:
+            self._recompute_rounds = "all"
+        else:
+            pts = _log_spaced_recompute_rounds(T, recompute_frac, recompute_burn_in_rounds)
+            self._recompute_rounds = set(int(r) for r in pts)
 
         self.CS_P = []
         self.CS_theta_X = []
@@ -313,10 +355,10 @@ class SCOUTAlgorithm:
         """
         Return True if theta/tau estimates should be refreshed on round t.
 
-        Uses a tapering schedule: updates are frequent early (every round for
-        t < 50, every 10 for t < 3000) and become sparser as t grows (every
-        500 rounds for t >= 20000).  This amortises the cost of re-solving the
-        convex optimisation problem.
+        Behavior depends on recompute_frac set at construction:
+        - None (legacy): tapering schedule — frequent early, sparse late.
+        - "all": always True.
+        - set of ints: True iff t is in the pre-computed log-spaced set.
 
         Parameters
         ----------
@@ -326,17 +368,23 @@ class SCOUTAlgorithm:
         -------
         bool
         """
-        if t < 50:
+        if self._recompute_rounds is None:
+            # Legacy tapering schedule.
+            if t < self.recompute_burn_in_rounds:
+                return True
+            if t < 3000:
+                return t % 10 == 0
+            if t < 6000:
+                return t % 40 == 0
+            if t < 10000:
+                return t % 100 == 0
+            if t < 20000:
+                return t % 200 == 0
+            return t % 500 == 0
+        elif self._recompute_rounds == "all":
             return True
-        if t < 3000:
-            return t % 10 == 0
-        if t < 6000:
-            return t % 40 == 0
-        if t < 10000:
-            return t % 100 == 0
-        if t < 20000:
-            return t % 200 == 0
-        return t % 500 == 0
+        else:
+            return t in self._recompute_rounds
 
     def run(self):
         """Run the SCOUT algorithm for T rounds."""
@@ -347,7 +395,7 @@ class SCOUTAlgorithm:
             Xt = self._generate_context()
             self.all_contexts.append(Xt)
 
-            if t < 50:
+            if t < self.recompute_burn_in_rounds:
                 # Warmup: always test.
                 Zt = 1
                 diam_bound = np.inf
@@ -357,6 +405,7 @@ class SCOUTAlgorithm:
                            + np.sqrt(self.d * np.log(1 + t / (16 * self.d * lambd))
                                      + np.log(4 * self.T / self.delta)))
                 beta_t = (gamma_t + gamma_t ** 2 / np.sqrt(lambd)) / self.looseness_factor_beta
+                beta_t *= self.S  # scale for ||θ*|| and ||x|| norms (paper assumes both = 1)
                 diam_bound = np.sqrt(2 * beta_t ** 2 / self.N_theta) if self.N_theta > 0 else np.inf
 
                 if (theta_est == 0).all() or self.compute_on_round(t):
@@ -397,10 +446,7 @@ class SCOUTAlgorithm:
 
     def _generate_context(self):
         """Sample a context vector from the synthetic distribution (simulation only)."""
-        if self.d == 2:
-            return draw_2d_unit_ball_vector()
-        else:
-            return draw_unit_ball_vector(self.d)
+        return draw_unit_ball_vector(self.d)
 
     def _generate_label(self, x):
         """Sample a binary label from the logistic model (simulation only)."""
@@ -500,12 +546,15 @@ class _RealDataSCOUT(SCOUTAlgorithm):
     """
 
     def __init__(self, X_perm, Y_perm, alpha, delta, S=1,
-                 looseness_factor_beta=500, looseness_factor_theta_est=1):
+                 looseness_factor_beta=500, looseness_factor_theta_est=1,
+                 recompute_frac=None, recompute_burn_in_rounds=50):
         n, d = X_perm.shape
         # true_theta=None: the algorithm does not know the ground-truth theta
         super().__init__(d=d, T=n, alpha=alpha, delta=delta, true_theta=None, S=S,
                          looseness_factor_beta=looseness_factor_beta,
-                         looseness_factor_theta_est=looseness_factor_theta_est)
+                         looseness_factor_theta_est=looseness_factor_theta_est,
+                         recompute_frac=recompute_frac,
+                         recompute_burn_in_rounds=recompute_burn_in_rounds)
         self._stream_X = X_perm
         self._stream_Y = Y_perm
         self._stream_idx = 0
@@ -650,7 +699,7 @@ def plot_aggregate_results(all_cum_tests, all_cum_errors, all_cum_tests_opt,
 
 def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
                           true_theta=None, num_runs=1, aggressiveness=10.0, debug=False,
-                          out_dir="figures"):
+                          out_dir="figures", recompute_frac=None, recompute_burn_in_rounds=50):
     """
     Run the SCOUT synthetic experiment and aggregate results across runs.
 
@@ -665,9 +714,16 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
         Ground-truth parameter.  If None, defaults to the unit vector along
         the first axis.
     num_runs : int — number of independent runs (seeds 0, 1, ..., num_runs-1)
-    aggressiveness : float - (default 1.0).  Higher values → more aggressive testing (tighter confidence sets, weaker regularisation)
+    aggressiveness : float - (default 10.0).  Higher values → more aggressive testing (tighter confidence sets, weaker regularisation)
     debug : bool - if True, track per-round theta estimates, confidence radii, and lambdas for debugging
     out_dir : str — directory for .npz and .pdf outputs (default "figures")
+    recompute_frac : float or None
+        Fraction of rounds on which theta/tau estimates are recomputed.
+        None (default): use the legacy tapering schedule.
+        1.0: recompute every round (highest accuracy, slowest).
+        0 < f < 1: recompute on round(f * T) log-spaced timesteps.
+    recompute_burn_in_rounds : int
+        Warmup rounds (default 50); recompute schedule starts after this point.
 
     Returns
     -------
@@ -697,7 +753,9 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
 
         scout = SCOUTAlgorithm(d, T, alpha, delta, true_theta, S,
                                looseness_factor_beta=500 * aggressiveness,
-                               looseness_factor_theta_est=aggressiveness)
+                               looseness_factor_theta_est=aggressiveness,
+                               recompute_frac=recompute_frac,
+                               recompute_burn_in_rounds=recompute_burn_in_rounds)
         scout.run()
         results = scout.evaluate()
         all_results.append(results)
@@ -779,8 +837,9 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
     return avg_results
 
 
-def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressiveness=10.0,
-                      title=None, debug=False, out_dir="figures"):
+def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=None, aggressiveness=10.0,
+                      title=None, debug=False, out_dir="figures", recompute_frac=None,
+                      recompute_burn_in_rounds=50):
     """
     Evaluate SCOUT on a real labelled dataset.
 
@@ -808,13 +867,15 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
     delta : float
         SCOUT failure probability; safety guarantee holds with prob >= 1-delta
         (default 0.1).
-    S : float
-        Assumed upper bound on ||theta*||_2 (default 1).  Does not affect the
-        core algorithm in the current implementation but is passed through for
-        consistency with the theoretical framework.
+    S : float or None
+        Assumed upper bound on ||theta*||_2.  If None (default), computed
+        automatically as 2 * ||theta_star|| * mean_row_norm(X), where
+        theta_star is the full-data MLE.  Pass an explicit float to override.
+        Does not affect the core algorithm in the current implementation but
+        is passed through for consistency with the theoretical framework.
     aggressiveness : float
         Rescales the confidence radius and regularisation strength.
-        With a value of 1.0: extremely conservative and safe, 
+        With a value of 1.0: extremely conservative and safe,
         but slow convergence to optimal testing rate.
         Default value of 10.0, higher values → more aggressive testing.
     title : str or None
@@ -824,6 +885,11 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
         If True, records per-permutation theta estimates, confidence radii,
         and lambda values in the saved .npz (default False).
     out_dir : str — directory for .npz and .pdf outputs (default "figures")
+    recompute_frac : float or None
+        Fraction of rounds on which theta/tau estimates are recomputed.
+        None (default): use the legacy tapering schedule.
+        1.0: recompute every round (highest accuracy, slowest).
+        0 < f < 1: recompute on round(f * n) log-spaced timesteps.
 
     Returns
     -------
@@ -854,6 +920,12 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
     if theta_star is None:
         raise ValueError("Could not fit theta_star: dataset appears to be empty.")
 
+    if S is None:
+        theta_norm = np.linalg.norm(theta_star)
+        mean_row_norm = np.mean(np.linalg.norm(X, axis=1))
+        S = 2.0 * theta_norm * mean_row_norm
+        print(f"  Auto-computed S={S:.4f}  (||theta_star||={theta_norm:.4f}, mean ||x||={mean_row_norm:.4f})")
+
     tau_star = compute_tau_opt(theta_star, X, alpha)
     opt_test_rate = float(np.mean(np.abs(X @ theta_star) < tau_star))
     print(f"  tau_star={tau_star:.4f}, opt_test_rate={opt_test_rate:.4f}")
@@ -876,7 +948,9 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=1, aggressive
 
         scout = _RealDataSCOUT(X_perm, Y_perm, alpha, delta, S,
                                looseness_factor_beta=500 * aggressiveness,
-                               looseness_factor_theta_est=aggressiveness)
+                               looseness_factor_theta_est=aggressiveness,
+                               recompute_frac=recompute_frac,
+                               recompute_burn_in_rounds=recompute_burn_in_rounds)
         scout.run()
 
         Z = np.array(scout.all_decisions)
