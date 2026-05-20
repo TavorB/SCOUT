@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import numpy as np
+from unittest.mock import patch
 
 _TEST_OUT_DIR = "SCOUT_test_dir"
 
@@ -30,6 +31,7 @@ from SCOUT import (
     logistic,
     draw_unit_ball_vector,
     generate_synthetic_data,
+    log_loss_and_grad,
     compute_theta_est_cvx,
     compute_theta_mle,
     compute_tau_opt,
@@ -89,6 +91,15 @@ def test_utility_functions():
                                             looseness_factor_theta_est=1.0)
     assert theta_est_empty is None, "Expected None for empty input"
 
+    # fused objective/gradient should use the correct regularization multiplier
+    theta = np.array([0.3, -0.2, 0.1])
+    X0 = np.zeros((1, 3))
+    y0 = np.array([0.0])
+    lambd = 0.7
+    loss, grad = log_loss_and_grad(theta, X0, y0, lambd)
+    assert np.isfinite(loss)
+    assert np.allclose(grad, 2 * lambd * theta)
+
     # compute_theta_mle
     theta_mle = compute_theta_mle(X[:50], Y[:50].astype(float))
     assert theta_mle is not None
@@ -98,6 +109,36 @@ def test_utility_functions():
     tau = compute_tau_opt(theta, X[:50], alpha=0.05)
     assert np.isscalar(tau) or (isinstance(tau, np.ndarray) and tau.ndim == 0)
     assert float(tau) >= 0
+
+
+def test_compute_theta_est_cvx_uses_warm_start_and_fused_jacobian():
+    """compute_theta_est_cvx should forward init_theta to minimize and use jac=True."""
+    X = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    y = np.array([0.0, 1.0, 1.0])
+    init_theta = np.array([0.25, -0.5])
+
+    captured = {}
+
+    class _Result:
+        def __init__(self, x):
+            self.x = x
+
+    def _fake_minimize(fun, x0, args=(), method=None, jac=None):
+        captured["x0"] = np.array(x0, dtype=float)
+        captured["method"] = method
+        captured["jac"] = jac
+        captured["fun_output"] = fun(x0, *args)
+        return _Result(np.array([1.0, 2.0]))
+
+    with patch("SCOUT.minimize", side_effect=_fake_minimize):
+        theta_est = compute_theta_est_cvx(X, y, t=5, looseness_factor_theta_est=1.0,
+                                          init_theta=init_theta)
+
+    assert np.allclose(captured["x0"], init_theta)
+    assert captured["method"] == "L-BFGS-B"
+    assert captured["jac"] is True
+    assert isinstance(captured["fun_output"], tuple) and len(captured["fun_output"]) == 2
+    assert np.allclose(theta_est, np.array([1.0, 2.0]))
 
 
 # ---------------------------------------------------------------------------

@@ -66,30 +66,42 @@ def draw_unit_ball_vector(d, bias_towards_edge=True):
     return r * u
 
 
+# def log_loss_and_grad(theta, X, y, lambd):
+#     """
+#     Regularised logistic log-loss and its gradient.
+
+#     Returns
+#     -------
+#     tuple[float, np.ndarray]
+#         The objective value and gradient at theta.
+#     """
+#     X_theta = X @ theta
+#     mu = 1 / (1 + np.exp(-X_theta))
+#     loss = -np.sum(y * np.log(mu) + (1 - y) * np.log(1 - mu)) + lambd * np.sum(theta ** 2)
+#     grad = X.T @ (mu - y) + 2 * lambd * theta
+#     return loss, grad
+
+# from scipy.special import expit, logaddexp
+def log_loss_and_grad(theta, X, y, lambd):
+    """
+    Optimized regularised logistic log-loss and its gradient.
+    """
+    X_theta = X @ theta
+    # logaddexp(0, z) computes log(1 + exp(z)) without overflow
+    # loss = np.sum(logaddexp(0, X_theta) - y * X_theta) + lambd * np.dot(theta, theta)
+    loss = np.sum(np.log(1 + np.exp(X_theta)) - y * X_theta) + lambd * np.dot(theta, theta)
+    mu = 1.0 / (1.0 + np.exp(-X_theta))
+    grad = X.T @ (mu - y) + 2 * lambd * theta
+    return loss, grad
+
 def log_loss(theta, X, y, lambd):
-    """
-    Regularised logistic log-loss.
-
-    Parameters
-    ----------
-    theta : np.ndarray, shape (d,)
-    X : np.ndarray, shape (n, d)
-    y : np.ndarray, shape (n,)  — binary labels in {0, 1}
-    lambd : float — L2 regularisation coefficient
-
-    Returns
-    -------
-    float
-    """
-    mu = 1 / (1 + np.exp(-X @ theta))
-    loss = -np.sum(y * np.log(mu) + (1 - y) * np.log(1 - mu)) + lambd * np.linalg.norm(theta) ** 2
-    return loss
+    """Regularised logistic log-loss."""
+    return log_loss_and_grad(theta, X, y, lambd)[0]
 
 
 def gradient_log_loss(theta, X, y, lambd):
     """Gradient of the regularised log-loss with respect to theta."""
-    mu = 1 / (1 + np.exp(-X @ theta))
-    return X.T @ (mu - y) + lambd * theta
+    return log_loss_and_grad(theta, X, y, lambd)[1]
 
 
 def hessian_log_loss(theta, X, lambd):
@@ -99,7 +111,7 @@ def hessian_log_loss(theta, X, lambd):
     return X.T @ W @ X + lambd * np.eye(len(theta))
 
 
-def compute_theta_est_cvx(X, y, t, looseness_factor_theta_est=1):
+def compute_theta_est_cvx(X, y, t, looseness_factor_theta_est=1, init_theta=None):
     """
     Estimate theta by minimising the regularised log-loss (L-BFGS-B).
 
@@ -113,6 +125,8 @@ def compute_theta_est_cvx(X, y, t, looseness_factor_theta_est=1):
     t : int — current round (controls regularisation strength)
     looseness_factor_theta_est : float
         Divides lambda_t; values > 1 reduce regularisation (default 1).
+    init_theta : np.ndarray or None
+        Initial guess passed to L-BFGS-B. Defaults to zeros.
 
     Returns
     -------
@@ -123,12 +137,13 @@ def compute_theta_est_cvx(X, y, t, looseness_factor_theta_est=1):
 
     d = X.shape[1]
     lambd = d * np.log(t + 1) / looseness_factor_theta_est
+    x0 = np.zeros(d) if init_theta is None else np.asarray(init_theta, dtype=float)
 
     try:
-        result = minimize(log_loss, np.zeros(d), args=(X, y, lambd),
-                          method='L-BFGS-B', jac=gradient_log_loss)
+        result = minimize(log_loss_and_grad, x0, args=(X, y, lambd),
+                          method='L-BFGS-B', jac=True)
         theta_hat_t = result.x
-    except Exception:
+    except (ValueError, FloatingPointError, np.linalg.LinAlgError):
         theta_hat_t = np.zeros(d)
 
     return theta_hat_t
@@ -156,10 +171,10 @@ def compute_theta_mle(X, y):
     d = X.shape[1]
     lambd = 1e-8
     try:
-        result = minimize(log_loss, np.zeros(d), args=(X, y, lambd),
-                          method='L-BFGS-B', jac=gradient_log_loss)
+        result = minimize(log_loss_and_grad, np.zeros(d), args=(X, y, lambd),
+                          method='L-BFGS-B', jac=True)
         return result.x
-    except Exception:
+    except (ValueError, FloatingPointError, np.linalg.LinAlgError):
         return np.zeros(d)
 
 
@@ -334,22 +349,23 @@ class SCOUTAlgorithm:
             pts = _log_spaced_recompute_rounds(T, recompute_frac, recompute_burn_in_rounds)
             self._recompute_rounds = set(int(r) for r in pts)
 
-        self.CS_P = []
-        self.CS_theta_X = []
-        self.CS_theta_y = []
+        self.CS_P = np.empty((T, d), dtype=float)
+        self.CS_theta_X = np.empty((T, d), dtype=float)
+        self.CS_theta_y = np.empty(T, dtype=float)
         self.N_P = 0
         self.N_theta = 0
 
-        self.all_contexts = []
-        self.all_labels = []
-        self.all_decisions = []
-        self.all_predictions = []
+        self.all_contexts = np.empty((T, d), dtype=float)
+        self.all_labels = np.empty(T, dtype=int)
+        self.all_decisions = np.empty(T, dtype=int)
+        self.all_predictions = np.empty(T, dtype=int)
 
-        self.all_theta_ests = []
-        self.all_lambds = []
-        self.all_diam_bounds = []
+        # self.all_theta_ests = []
+        self.all_lambds = np.empty(T, dtype=float)
+        self.all_diam_bounds = np.empty(T, dtype=float)
 
         self.true_theta = true_theta
+        self._last_theta_est = None
 
     def compute_on_round(self, t):
         """
@@ -393,7 +409,7 @@ class SCOUTAlgorithm:
 
         for t in tqdm(range(self.T)):
             Xt = self._generate_context()
-            self.all_contexts.append(Xt)
+            self.all_contexts[t] = Xt
 
             if t < self.recompute_burn_in_rounds:
                 # Warmup: always test.
@@ -410,39 +426,42 @@ class SCOUTAlgorithm:
 
                 if (theta_est == 0).all() or self.compute_on_round(t):
                     theta_est = compute_theta_est_cvx(
-                        np.array(self.CS_theta_X),
-                        np.array(self.CS_theta_y),
+                        self.CS_theta_X[:self.N_theta],
+                        self.CS_theta_y[:self.N_theta],
                         t,
                         self.looseness_factor_theta_est,
+                        init_theta=theta_est,
                     )
                     tau_est = compute_tau_opt(
-                        theta_est, np.array(self.CS_P), self.alpha - diam_bound
+                        theta_est, self.CS_P[:self.N_P], self.alpha - diam_bound
                     )
 
                 Zt = 1 if np.abs(Xt @ theta_est) < tau_est + diam_bound else 0
 
-            self.all_decisions.append(Zt)
+            self.all_decisions[t] = Zt
 
             Yt = self._generate_label(Xt)
-            self.all_labels.append(Yt)
+            self.all_labels[t] = Yt
 
             if Zt == 1:
-                self.all_predictions.append(Yt)
+                self.all_predictions[t] = Yt
                 if t % 2 == 0:  # even tested rounds → theta estimation set
-                    self.CS_theta_X.append(Xt)
-                    self.CS_theta_y.append(Yt)
+                    self.CS_theta_X[self.N_theta] = Xt
+                    self.CS_theta_y[self.N_theta] = Yt
                     self.N_theta += 1
             else:
                 Y_hat_t = 1 if np.dot(Xt, theta_est) > 0 else 0
-                self.all_predictions.append(Y_hat_t)
+                self.all_predictions[t] = Y_hat_t
 
             if t % 2 == 1:  # odd rounds → distribution estimation set
-                self.CS_P.append(Xt)
+                self.CS_P[self.N_P] = Xt
                 self.N_P += 1
 
-            self.all_theta_ests.append(theta_est.copy() if not (theta_est == 0).all() else None)
-            self.all_lambds.append(self.d * np.log(t + 1) / self.looseness_factor_theta_est)
-            self.all_diam_bounds.append(diam_bound)
+            # self.all_theta_ests.append(theta_est.copy() if not (theta_est == 0).all() else None)
+            self.all_lambds[t] = self.d * np.log(t + 1) / self.looseness_factor_theta_est
+            self.all_diam_bounds[t] = diam_bound
+
+        self._last_theta_est = theta_est.copy()
 
     def _generate_context(self):
         """Sample a context vector from the synthetic distribution (simulation only)."""
@@ -512,11 +531,13 @@ class SCOUTAlgorithm:
         test_rate = num_tests / self.T
 
         if self.N_theta > 0:
+            init_theta = self._last_theta_est
             final_theta = compute_theta_est_cvx(
-                np.array(self.CS_theta_X),
-                np.array(self.CS_theta_y),
+                self.CS_theta_X[:self.N_theta],
+                self.CS_theta_y[:self.N_theta],
                 self.N_theta,
                 self.looseness_factor_theta_est,
+                init_theta=init_theta,
             )
         else:
             final_theta = np.zeros(self.d)
@@ -608,7 +629,7 @@ def plot_aggregate_results(all_cum_tests, all_cum_errors, all_cum_tests_opt,
     all_cum_errors = np.array(all_cum_errors)
     all_cum_tests_opt = np.array(all_cum_tests_opt)
     all_cum_errors_opt = np.array(all_cum_errors_opt)
-    num_runs, T = all_cum_tests.shape
+    _, T = all_cum_tests.shape
 
     mean_cum_tests = np.mean(all_cum_tests, axis=0)
     q10_cum_tests = np.quantile(all_cum_tests, 0.10, axis=0)
@@ -743,9 +764,9 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
     all_cum_tests_opt = []
     all_cum_errors_opt = []
     if debug:
-        all_run_theta_ests = []
-        all_run_lambds = []
-        all_run_diam_bounds = []
+        # Preallocate fixed-size debug arrays: (num_runs, T)
+        all_run_lambds = np.full((num_runs, T), np.nan, dtype=float)
+        all_run_diam_bounds = np.full((num_runs, T), np.nan, dtype=float)
 
     for run in range(num_runs):
         print(f"  Run {run + 1}/{num_runs}...")
@@ -788,11 +809,8 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
         all_cum_errors_opt.append(cum_errors_opt)
 
         if debug:
-            theta_ests = np.array([t if t is not None else np.full(d, np.nan)
-                                   for t in scout.all_theta_ests])
-            all_run_theta_ests.append(theta_ests)
-            all_run_lambds.append(np.array(scout.all_lambds))
-            all_run_diam_bounds.append(np.array(scout.all_diam_bounds))
+            all_run_lambds[run] = scout.all_lambds
+            all_run_diam_bounds[run] = scout.all_diam_bounds
 
     avg_results = {
         'error_rate': np.mean([r['error_rate'] for r in all_results]),
@@ -816,9 +834,8 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     fname = str(Path(out_dir) / f"{title}.npz")
     debug_kwargs = dict(
-        all_theta_ests=np.array(all_run_theta_ests),
-        all_lambds=np.array(all_run_lambds),
-        all_diam_bounds=np.array(all_run_diam_bounds),
+        all_lambds=all_run_lambds,
+        all_diam_bounds=all_run_diam_bounds,
     ) if debug else {}
     np.savez(fname,
              all_cum_tests=all_cum_tests,
@@ -833,6 +850,17 @@ def run_scout_experiment(d=2, T=1000, alpha=0.05, delta=0.01, S=1,
                            all_cum_errors_opt, alpha, opt_test_rate,
                            label_prefix=f"SCOUT (d={d}, T={T}, α={alpha})",
                            fig_fname=title, out_dir=out_dir)
+
+    # Include debug arrays in return when requested
+    if debug:
+        avg_results.update({
+            'all_lambds': all_run_lambds,
+            'all_diam_bounds': all_run_diam_bounds,
+            'all_cum_tests': np.array(all_cum_tests),
+            'all_cum_errors': np.array(all_cum_errors),
+            'all_cum_tests_opt': np.array(all_cum_tests_opt),
+            'all_cum_errors_opt': np.array(all_cum_errors_opt),
+        })
 
     return avg_results
 
@@ -935,9 +963,9 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=None, aggress
     all_cum_tests_opt = []
     all_cum_errors_opt = []
     if debug:
-        all_perm_theta_ests = []
-        all_perm_lambds = []
-        all_perm_diam_bounds = []
+        # Preallocate fixed-size debug arrays: (num_perms, n)
+        all_perm_lambds = np.full((num_perms, n), np.nan, dtype=float)
+        all_perm_diam_bounds = np.full((num_perms, n), np.nan, dtype=float)
 
     for perm_idx in range(num_perms):
         print(f"  Permutation {perm_idx + 1}/{num_perms}...")
@@ -972,16 +1000,12 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=None, aggress
         all_cum_errors_opt.append(cum_errors_opt)
 
         if debug:
-            theta_ests = np.array([t if t is not None else np.full(d, np.nan)
-                                   for t in scout.all_theta_ests])
-            all_perm_theta_ests.append(theta_ests)
-            all_perm_lambds.append(np.array(scout.all_lambds))
-            all_perm_diam_bounds.append(np.array(scout.all_diam_bounds))
+            all_perm_lambds[perm_idx] = scout.all_lambds
+            all_perm_diam_bounds[perm_idx] = scout.all_diam_bounds
 
     debug_kwargs = dict(
-        all_theta_ests=np.array(all_perm_theta_ests),
-        all_lambds=np.array(all_perm_lambds),
-        all_diam_bounds=np.array(all_perm_diam_bounds),
+        all_lambds=all_perm_lambds,
+        all_diam_bounds=all_perm_diam_bounds,
     ) if debug else {}
     fname = str(Path(out_dir) / f"{title}.npz")
     np.savez(fname,
@@ -1002,7 +1026,7 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=None, aggress
         fig_fname=title, out_dir=out_dir
     )
 
-    return {
+    result = {
         'theta_star': theta_star,
         'tau_star': tau_star,
         'opt_test_rate': opt_test_rate,
@@ -1011,6 +1035,12 @@ def eval_on_real_data(X, Y, alpha=0.05, num_perms=10, delta=0.1, S=None, aggress
         'all_cum_tests_opt': np.array(all_cum_tests_opt),
         'all_cum_errors_opt': np.array(all_cum_errors_opt),
     }
+    if debug:
+        result.update({
+            'all_lambds': all_perm_lambds,
+            'all_diam_bounds': all_perm_diam_bounds,
+        })
+    return result
 
 
 def validate_on_synthetic_data(d=2, n=5000, alpha=0.05, true_theta=None, S=1,
